@@ -1,7 +1,140 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 %matplotlib inline
 
+# A data frame of multiple data frames which represent each individual road
+df_road = pd.read_csv("_roads2_edit.csv")
+road_num = df_road['road'].unique()
+df_road = pd.DataFrame(data = [[road, df_road[df_road['road'] == road]] for road in road_num],
+                       columns=['road', 'data_frame'])
+df_road.head()
+
+# Select any arbitrary road: N1
+df = df_road['data_frame'].iloc[0]
+df.head()
+
+# function defines the distance between two locations
+from math import sin, cos, atan2, sqrt, pi, radians
+def distance(loc1, loc2, R = 6380):
+    #change the value into radians
+    lat1 = radians(float(loc1[0]))
+    lon1 = radians(float(loc1[1]))
+    
+    lat2 = radians(float(loc2[0]))
+    lon2 = radians(float(loc2[1]))
+    
+    #calculate the distance
+    dlon = lon2 - lon1 
+    dlat = lat2 - lat1 
+    a = (sin(dlat/2))**2 + cos(lat1) * cos(lat2) * (sin(dlon/2))**2
+    c = 2 * atan2( sqrt(a), sqrt(1-a) )
+    d = R * c # where R is the radius of the Earth
+    return d
+    
+    import statsmodels.api as sm
+
+def visual_check(df, n = 5, cols = ['lat', 'lon'], nbr = 20, bar = 0.001, dis = 10):
+    """
+    Main Purpose: "Detection" of abnormal points
+    1. Outliers(i.e. out-of-trend) by fitting into the trend (local regression)
+    2. Far-away points which have further distance than 10km (10km can be adjusted by the parameter 'dis')
+    """
+    x = np.linspace(0,1,len(df))
+    frac = nbr/len(df)
+    df['x'] = x
+    
+    #distance checker
+    d = []
+    for i in range(len(df)-1):
+        loc1 = [df[cols].iloc[i][0], df[cols].iloc[i][1]]
+        loc2 = [df[cols].iloc[i+1][0], df[cols].iloc[i+1][1]]
+        d.append(distance(loc1, loc2))
+    df['distance'] = np.array([None] + d)
+
+    plt.figure(figsize = (15, 7))
+    for i in range(len(cols)):
+        y = df[cols[i]]
+#         lowess will returns a smoothed data set, namely the "trend line"
+        lowess = sm.nonparametric.lowess(y, x, frac)
+        yest = list(zip(*lowess))[1]
+        
+        df['est'] = yest
+        df['ratio'] = abs(y/yest - 1)
+        suspicious = df.sort_values(by = 'ratio', ascending = False)[:n]
+        
+        plt.subplot(1, len(cols), i+1)
+        
+#         plot data
+        plt.plot(x, y, label='data', ls = '--')
+#         plot trend line
+        plt.plot(x, yest, label='trend', lw = 5, alpha = 0.2, color = 'red')
+#         plot far-away points
+        plt.scatter(x[np.array(df['distance'] > dis)], y[df['distance'] > dis],
+                    label = 'more than {dis} km'.format(dis = dis),
+                    color = 'green')
+#         plot outliers
+        plt.scatter(x[np.array(abs(y/yest - 1) > bar)], y[abs(y/yest - 1) > bar],
+                    label='outliers', s = 50,
+                    color = 'black')
+#         plot top 5 suspicious points
+        plt.scatter(suspicious['x'], suspicious[cols[i]],
+                    label='top {num} deviation'.format(num = n),
+                    marker = "o", s = 100, facecolors = "none", edgecolors = 'red', linewidths = 2)     
+        plt.ylabel(cols[i])
+        plt.title("(Estimated) Trend vs. Raw Data ({bar}% deviation)".format(bar = bar * 100))
+        plt.legend()
+        
+#         print(suspicious[["road", "chainage", "lrp", "lat", "lon"]])
+#         print("num outliers: ", sum(abs(y/yest - 1) > bar))
+
+def smoothing(df, cols = ['lat', 'lon'], nbr = 20, bar = 0.001, dis = 10):
+    """
+    Correcting algorithm
+    1. Outliers: Fit to the trend line
+    2. Far-away points: Drop and Interpolate
+    """
+#     run the script until no outliers and far-away points are detected.
+    num_strange = [1, 1, 1]
+    while (sum(num_strange) > 0):
+#         1. outliers correction
+        x = np.linspace(0,1,len(df))
+        frac = nbr/len(df)
+        df['x'] = x
+        
+        num_strange = [1,1,1]
+
+        for i in range(len(cols)):
+#             run local regression
+            y = df[cols[i]]
+            lowess = sm.nonparametric.lowess(y, x, frac)
+            yest = np.array(list(zip(*lowess))[1])
+            
+#             record the number of outliers
+            num_strange[i] = sum(abs(y/yest - 1) > bar)
+    
+#             fit outliers to yest
+            idx = y[abs(y/yest - 1) > bar].index
+            new_val = yest[np.array(abs(y/yest - 1) > bar)]
+            y = y.where(abs(y/yest - 1) <= bar)
+            d = dict(zip(idx, new_val))
+            y.fillna(d, inplace = True)
+            df[cols[i]] = y
+
+#         2. far-away points correction
+        d = []
+        for i in range(len(df)-1):
+            loc1 = [df[cols].iloc[i][0], df[cols].iloc[i][1]]
+            loc2 = [df[cols].iloc[i+1][0], df[cols].iloc[i+1][1]]
+            d.append(distance(loc1, loc2))
+        df['distance'] = np.array([None] + d)
+        
+#         record the number of far-away points
+        num_strange[2] = len(df.where(df['distance'] > dis).dropna())
+        
+#         interpolate far-away points 
+        df.set_value(df.where(df['distance'] > dis).dropna().index, ['lat', 'lon'], None)
+        df[['lat', 'lon']] = df[['lat', 'lon']].interpolate()
+
+    return df
